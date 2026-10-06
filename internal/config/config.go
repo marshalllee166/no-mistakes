@@ -228,6 +228,12 @@ type GlobalConfig struct {
 	Commit GlobalCommitRaw
 	Intent GlobalIntentRaw
 	Test   TestRaw
+	// TestE2E is the operator's global-only test.e2e policy (see
+	// GlobalTestRaw.E2E). Empty means local.
+	TestE2E string
+	// PR is the operator's own PR-body publication default. A trusted repo
+	// pr.appendix still wins over it; see OperatorPRRaw.
+	PR OperatorPRRaw
 	// Review carries the operator's own review guidance for every gated
 	// repository. Only path_instructions exists here: like review_agents it
 	// comes from this machine, never from a pushed branch, and it can only add
@@ -275,7 +281,8 @@ type globalConfigRaw struct {
 	Rebase                    RebaseRaw                  `yaml:"rebase"`
 	Commit                    GlobalCommitRaw            `yaml:"commit"`
 	Intent                    GlobalIntentRaw            `yaml:"intent"`
-	Test                      TestRaw                    `yaml:"test"`
+	Test                      GlobalTestRaw              `yaml:"test"`
+	PR                        OperatorPRRaw              `yaml:"pr"`
 	Review                    OperatorReviewRaw          `yaml:"review"`
 	Eval                      EvalRaw                    `yaml:"eval"`
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
@@ -324,9 +331,24 @@ type OperatorReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
 }
 
-// RepositoryPRRaw contains machine-local per-repository PR title settings.
+// RepositoryPRRaw contains machine-local per-repository PR settings.
 type RepositoryPRRaw struct {
-	TitleFormat *string `yaml:"title_format"`
+	OperatorPRRaw `yaml:",inline"`
+	TitleFormat   *string `yaml:"title_format"`
+}
+
+// OperatorPRRaw is the PR-body publication block the operator's global config
+// may set, globally or per repository. Nil leaves the next layer in charge.
+type OperatorPRRaw struct {
+	// Appendix is the operator default for pr.appendix (full, collapsed,
+	// minimal, none). A trusted repository pr.appendix still wins.
+	Appendix *string `yaml:"appendix"`
+	// PreserveBody publishes every PR in owned-body mode: the live
+	// description is kept verbatim as author text and only the delimited
+	// generated appendix is refreshed, so a re-run never overwrites a curated
+	// description. Operator-only: it changes what this machine writes, never
+	// what a repository requires.
+	PreserveBody *bool `yaml:"preserve_body"`
 }
 
 // RepositoryOverrides maps remote URLs to machine-local per-repository settings.
@@ -886,9 +908,11 @@ type PR struct {
 	Template   string
 	// Nil preserves the historical default: publish the extracted intent.
 	PublishIntent *bool
-	// Appendix is full, collapsed, or minimal. Empty preserves full.
+	// Appendix is full, collapsed, minimal, or none. Empty preserves full.
 	Appendix    string
 	TitleFormat string
+	// PreserveBody is the operator's owned-body mode (OperatorPRRaw).
+	PreserveBody bool
 }
 
 // Document is the resolved document-step config. Instructions come from the
@@ -1072,6 +1096,36 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// E2EInCI is the operator's global-only test.e2e: ci policy (see
+	// GlobalTestRaw.E2E).
+	E2EInCI bool
+}
+
+const (
+	// TestE2ELocal lets the Test agent stand the product up locally. Default.
+	TestE2ELocal = "local"
+	// TestE2ECI keeps end-to-end validation in CI: no local E2E suites, dev
+	// servers or container stacks, and an inconclusive verdict does not park.
+	TestE2ECI = "ci"
+)
+
+// GlobalTestRaw is the global config's `test:` block: the shared TestRaw
+// fields plus policy only the operator may set.
+type GlobalTestRaw struct {
+	TestRaw `yaml:",inline"`
+	// E2E names where end-to-end validation runs: local (default) or ci.
+	// Global-only: ci relaxes the inconclusive-verdict gate, so no
+	// repository config can express it.
+	E2E string `yaml:"e2e"`
+}
+
+func validateTestE2E(mode string) error {
+	switch mode {
+	case "", TestE2ELocal, TestE2ECI:
+		return nil
+	default:
+		return fmt.Errorf("test.e2e: %q is not a valid mode (want %q or %q)", mode, TestE2ELocal, TestE2ECI)
+	}
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -2390,7 +2444,13 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateGlobalCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
-	if err := validateTestRaw(raw.Test); err != nil {
+	if err := validateTestRaw(raw.Test.TestRaw); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateTestE2E(raw.Test.E2E); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateOperatorPR(raw.PR); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateEvalRaw(raw.Eval); err != nil {
@@ -2582,7 +2642,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Rebase = raw.Rebase
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
-	cfg.Test = raw.Test
+	cfg.Test = raw.Test.TestRaw
+	cfg.TestE2E = raw.Test.E2E
+	cfg.PR = raw.PR
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 	applyWorktreeOverrides(&cfg.Worktree, &raw.Worktree)
@@ -3491,6 +3553,8 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
+	// Global-only: relaxing the inconclusive gate is the operator's call.
+	test.E2EInCI = global.TestE2E == TestE2ECI
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
@@ -3542,6 +3606,24 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		Template:      repo.PR.Template,
 		PublishIntent: repo.PR.PublishIntent,
 		Appendix:      repo.PR.Appendix,
+	}
+	// Appendix precedence: trusted repo, then machine-local override, then
+	// global, then full. Preserve-body is operator-only.
+	operatorPR := []OperatorPRRaw{global.PR}
+	if override != nil {
+		operatorPR = append(operatorPR, override.PR.OperatorPRRaw)
+	}
+	operatorAppendix := ""
+	for _, layer := range operatorPR {
+		if layer.Appendix != nil {
+			operatorAppendix = *layer.Appendix
+		}
+		if layer.PreserveBody != nil {
+			pr.PreserveBody = *layer.PreserveBody
+		}
+	}
+	if pr.Appendix == "" {
+		pr.Appendix = operatorAppendix
 	}
 	if override != nil && override.PR.TitleFormat != nil {
 		pr.TitleFormat = *override.PR.TitleFormat

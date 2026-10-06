@@ -116,6 +116,14 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, err
 		}
 	}
+	// Template and preserve-body modes both publish an owned body: author
+	// text kept verbatim, only the delimited appendix refreshed.
+	owned := template != "" || preservesPRBody(sctx)
+	if owned {
+		if _, ok := host.(scm.PRContentReader); !ok {
+			return nil, fmt.Errorf("pr.preserve_body requires raw PR content reads; this provider is unsupported")
+		}
+	}
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return nil, err
@@ -137,7 +145,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, fmt.Errorf("read existing PR before publication: %w", err)
 			}
-		} else if template != "" {
+		} else if owned {
 			return nil, fmt.Errorf("provider cannot read existing PR content for author-safe template updates")
 		}
 		// Claim after the live read and before composition, so a reattach can
@@ -149,7 +157,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		updated := existing
 		// Removing pr.template must not switch an already owned body back to
 		// destructive drafting. Its live author narrative still wins.
-		if template != "" || hasPRAppendixMarkers(live.Body) {
+		if owned || hasPRAppendixMarkers(live.Body) {
 			if _, err := parsePROwnedBody(live.Body); err != nil {
 				return nil, err
 			}
@@ -161,6 +169,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					return nil, err
 				}
 				emptyNarrative = neutralizeAttestationMarkers(draft.Body)
+				title = draft.Title
+			} else if live.Body == "" && preservesPRBody(sctx) {
+				draft, err := s.draftPRNarrative(sctx, branch, baseBranch, baseSHA, bodyLimit)
+				if err != nil {
+					return nil, err
+				}
+				emptyNarrative = draft.Body
 				title = draft.Title
 			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
@@ -225,7 +240,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	if created == nil || strings.TrimSpace(created.URL) == "" {
-		if template != "" {
+		if owned {
 			return nil, fmt.Errorf("templated PR create returned no readable PR identity")
 		}
 		if len(sctx.ClosingIssueRefs) > 0 {
@@ -237,7 +252,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
-	if template != "" {
+	if owned {
 		reader, ok := host.(scm.PRContentReader)
 		if !ok {
 			return nil, fmt.Errorf("provider cannot verify the created template body")
@@ -437,6 +452,22 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
 		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
 	}
+	if preservesPRBody(sctx) {
+		if !supportsPRTemplates(provider) {
+			return prContent{}, fmt.Errorf("pr.preserve_body is unsupported by this provider")
+		}
+		// Owned from creation, so later runs keep the narrative verbatim.
+		content, err := s.draftPRNarrative(sctx, branch, baseBranch, baseSHA, bodyLimit)
+		if err != nil {
+			return prContent{}, err
+		}
+		appendix, err := s.buildPRAppendix(sctx, provider)
+		if err != nil {
+			return prContent{}, err
+		}
+		appendix = appendIssuesSection(appendix, issuesSection(sctx, content.Body))
+		return composeOwnedPRContent(prOwnedBody{before: content.Body}, content.Title, appendix, bodyLimit)
+	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
 		return prContent{}, err
@@ -455,16 +486,27 @@ func redactPRContent(content prContent) prContent {
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
+	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
+	if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
+		((bodyLimit > 0 && scm.PRBodyLen(marker) > bodyLimit) || len(marker) > maxPullRequestBodyBytes) {
+		return prContent{}, fmt.Errorf("pipeline attestation exceeds PR body limit")
+	}
+	content, err := s.draftPRNarrative(sctx, branch, baseBranch, baseSHA, bodyLimit)
+	if err != nil {
+		return prContent{}, err
+	}
+	content.Body = assembleDraftPRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	return content, nil
+}
+
+// draftPRNarrative drafts the title and the What Changed narrative only, with
+// no generated sections; on agent failure it falls back to the changed paths.
+func (s *PRStep) draftPRNarrative(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, bodyLimit int) (prContent, error) {
 	ctx := sctx.Ctx
 	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
 	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
-	}
-	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
-	if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
-		((bodyLimit > 0 && scm.PRBodyLen(marker) > bodyLimit) || len(marker) > maxPullRequestBodyBytes) {
-		return prContent{}, fmt.Errorf("pipeline attestation exceeds PR body limit")
 	}
 
 	titleRules := prTitlePromptRules(sctx)
@@ -502,8 +544,7 @@ Final diff paths and statuses:
 	})
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback, fallbackErr := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
-		return fallback, fallbackErr
+		return fallbackPRNarrative(sctx, finalDiff)
 	}
 
 	var content prContent
@@ -523,13 +564,12 @@ Final diff paths and statuses:
 				if content.Title != originalTitle {
 					slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
 				}
-				content.Body = assembleDraftPRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 				return content, nil
 			}
 		}
 	}
 
-	return fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	return fallbackPRNarrative(sctx, finalDiff)
 }
 
 func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string) (string, error) {
@@ -1529,6 +1569,15 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 }
 
 func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (prContent, error) {
+	content, err := fallbackPRNarrative(sctx, finalDiff)
+	if err != nil {
+		return prContent{}, err
+	}
+	content.Body = assembleDraftPRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	return content, nil
+}
+
+func fallbackPRNarrative(sctx *pipeline.StepContext, finalDiff string) (prContent, error) {
 	title, err := renderPRTitle(sctx, "update pull request")
 	if err != nil {
 		return prContent{}, err
@@ -1538,10 +1587,8 @@ func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingM
 	if diffSummary == "" {
 		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
 	}
-	body = neutralizeAttestationMarkers(body)
-	body = assembleDraftPRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 	return prContent{
 		Title: title,
-		Body:  body,
+		Body:  neutralizeAttestationMarkers(body),
 	}, nil
 }

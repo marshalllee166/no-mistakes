@@ -108,7 +108,12 @@ intent:
   disabled_readers: []
   # publish_intent: false # Keep the generated Intent section out of PR bodies by default
 
+pr:
+  # appendix: none # Operator default for pr.appendix; a trusted repo value wins
+  # preserve_body: true # Keep the live PR description; refresh only the generated appendix
+
 test:
+  # e2e: ci # End-to-end validation runs only in CI; see test.e2e
   evidence:
     store_in_repo: false
     attach_media: true
@@ -1095,6 +1100,8 @@ Precedence for these formatting fields is explicit: `.no-mistakes.yaml` wins for
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.
 Repositories matching no block keep existing global and built-in behavior.
 
+A matching entry can also set [`pr.appendix` and `pr.preserve_body`](#pr), overriding the global values for that one repository; a trusted repository `pr.appendix` still wins.
+
 #### Machine-local review and documentation guidance
 
 A matching entry can add review rules and documentation policy for that one repository, without committing anything to it:
@@ -1199,6 +1206,40 @@ For multi-file diffs, no-mistakes still requires at least two overlapping files 
 Partial matches older than 24 hours are rejected unless their raw score is at least `0.8`.
 If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
 Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
+
+### pr
+
+Operator-side PR body publication defaults, so a machine can publish curated descriptions without committing repository configuration.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `pr.appendix` | `string` | Unset (`full`) | Default for [`pr.appendix`](/no-mistakes/reference/repo-config/#prappendix): `full`, `collapsed`, `minimal`, or `none` |
+| `pr.preserve_body` | `bool` | `false` | Keep the live PR description verbatim and refresh only the generated appendix |
+
+```yaml
+pr:
+  appendix: none
+  preserve_body: true
+intent:
+  publish_intent: false # Also keep the generated Intent section out
+```
+
+`pr.appendix` precedence: the repository's trusted `pr.appendix`, then a matching [`repository_overrides`](#repository_overrides) entry, then this global value, then `full`. An unrecognized or empty value fails config parsing closed. `none` publishes no Risk, Testing, or Pipeline prose and no signature line: only the pipeline attestation marker, an HTML comment that GitHub, GitLab, Gitea, Forgejo, and Azure DevOps do not render, so `require-no-mistakes` keeps working.
+
+`pr.preserve_body: true` publishes every PR in the same owned-body form as [`pr.template`](/no-mistakes/reference/repo-config/#author-preserving-regeneration), without a template. A new PR gets the ordinary drafted narrative followed by one delimited generated appendix. On every later run the live description outside that appendix is author text: it is kept verbatim (including a body re-applied by hand with no appendix at all, which is adopted and gets a fresh appendix appended), the title is kept unless `pr.title_format` is configured, and only the appendix is refreshed. An existing PR with an empty body is drafted as if new. Every author-preserving rule from template mode applies: an unowned body that still carries a legacy attestation, or an edited appendix, fails rather than discarding text, and a body that cannot fit the provider budget fails instead of being truncated, so pair it with `pr.appendix: minimal` or `none` when Testing evidence is large. The provider must support raw PR content reads (the same providers as `pr.template`). Like the rest of this block, it is global or per-repository machine-local only; no repository config can set it.
+
+### test.e2e
+
+Where end-to-end validation runs: `local` (the default) or `ci`.
+
+```yaml
+test:
+  e2e: ci
+```
+
+`ci` is an operator policy for machines where end-to-end suites belong to the pull request's CI. The Test step's evidence and repair prompts then forbid running Playwright, hermetic, or any other end-to-end suite locally and starting dev servers, docker or compose stacks, or other local instances of the product; validation uses targeted unit, integration, or story tests for the changed code, and a scenario that needs the running product is reported `untested`. This overrides any local stand-up the repository's [`test.instructions`](/no-mistakes/reference/repo-config/#testinstructions) runbook describes.
+Under `ci` an `inconclusive` [verdict](/no-mistakes/reference/pipeline-steps/#test) no longer parks for an operator decision: it is recorded as an informational finding, the step completes, and the run still surfaces it as a Test exception (`passed-with-override`), never a clean pass. `no-go` and `no-surface` park exactly as before. An unrecognized value fails config parsing closed.
+Global-only: a repository config cannot express it, because it relaxes a gate.
 
 ### test.evidence
 

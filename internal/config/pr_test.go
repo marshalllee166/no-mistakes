@@ -42,7 +42,7 @@ func TestPRPublicationPolicyTrustedEvenWithCommandsOptIn(t *testing.T) {
 
 func TestLoadRepo_PRAppendix(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"", PRAppendixFull, PRAppendixCollapsed, PRAppendixMinimal} {
+	for _, mode := range []string{"", PRAppendixFull, PRAppendixCollapsed, PRAppendixMinimal, PRAppendixNone} {
 		raw := "pr: {}\n"
 		if mode != "" {
 			raw = "pr:\n  appendix: " + mode + "\n"
@@ -60,7 +60,7 @@ func TestLoadRepo_PRAppendix(t *testing.T) {
 			t.Fatalf("mode %q resolved to %q", mode, got)
 		}
 	}
-	for _, mode := range []string{"hidden", "FULL", "none", "off"} {
+	for _, mode := range []string{"hidden", "FULL", "NONE", "off"} {
 		if _, err := LoadRepoFromBytes([]byte("pr:\n  appendix: " + mode + "\n")); err == nil {
 			t.Fatalf("pr.appendix %q accepted", mode)
 		}
