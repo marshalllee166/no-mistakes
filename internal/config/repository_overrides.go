@@ -28,6 +28,9 @@ func normalizeRepositoryOverrides(raw RepositoryOverrides) (RepositoryOverrides,
 				return nil, fmt.Errorf("invalid repository_overrides.%s.pr: %w", key, err)
 			}
 		}
+		if err := validateOperatorPR(override.PR.OperatorPRRaw); err != nil {
+			return nil, fmt.Errorf("invalid repository_overrides.%s.%w", key, err)
+		}
 		overrides[key] = override
 	}
 	return overrides, nil

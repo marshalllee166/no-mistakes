@@ -44,7 +44,7 @@ type prOwnedBody struct {
 func parsePROwnedBody(body string) (prOwnedBody, error) {
 	if !hasPRAppendixMarkers(body) {
 		if strings.Contains(body, pipelineAttestationCommentPrefix) {
-			return prOwnedBody{}, fmt.Errorf("existing PR has an unowned legacy attestation; explicitly separate its generated evidence before enabling pr.template")
+			return prOwnedBody{}, fmt.Errorf("existing PR has an unowned legacy attestation; explicitly separate its generated evidence before enabling pr.template or pr.preserve_body")
 		}
 		return prOwnedBody{before: body}, nil
 	}

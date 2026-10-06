@@ -27,8 +27,8 @@ func appendixMode(sctx *pipeline.StepContext) string {
 // Intent is the caller's job: it stays outside a collapsed Validation block.
 func appendixEvidence(mode string, flavor prBodyFlavor, risk, testing, pipeline string) string {
 	switch mode {
-	case config.PRAppendixMinimal:
-		return minimalTail(risk, pipeline)
+	case config.PRAppendixMinimal, config.PRAppendixNone:
+		return compactTail(mode, risk, pipeline)
 	case config.PRAppendixCollapsed:
 		if flavor == prBodyHTML {
 			return wrapValidation(joinAppendixSections(risk, testing, pipeline))
@@ -66,6 +66,20 @@ func wrapValidation(inner string) string {
 // marker stays visible there.
 func minimalTail(risk, pipelineMD string) string {
 	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(risk)), noMistakesPRSignature, carriedAttestation(pipelineMD))
+}
+
+// noneTail is the attestation alone: no risk line, signature, Testing, or
+// Pipeline prose. Hidden on hosts that render HTML comments.
+func noneTail(pipelineMD string) string {
+	return carriedAttestation(pipelineMD)
+}
+
+// compactTail is the tail of the minimal and none modes.
+func compactTail(mode, risk, pipelineMD string) string {
+	if mode == config.PRAppendixNone {
+		return noneTail(pipelineMD)
+	}
+	return minimalTail(risk, pipelineMD)
 }
 
 func oneLineRisk(risk string) string {
@@ -114,9 +128,9 @@ func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string 
 }
 
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	switch appendixMode(sctx) {
-	case config.PRAppendixMinimal:
-		return assembleMinimalPRBody(sctx, whatChanged, riskLine, pipelineMD, bodyLimit)
+	switch mode := appendixMode(sctx); mode {
+	case config.PRAppendixMinimal, config.PRAppendixNone:
+		return assembleMinimalPRBody(sctx, mode, whatChanged, riskLine, pipelineMD, bodyLimit)
 	case config.PRAppendixCollapsed:
 		if prBodyFlavorFor(provider) == prBodyHTML {
 			return assembleCollapsedPRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit)
@@ -125,9 +139,9 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 	return assemblePRBodyFull(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit)
 }
 
-func assembleMinimalPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int) string {
+func assembleMinimalPRBody(sctx *pipeline.StepContext, mode, whatChanged, riskLine, pipelineMD string, bodyLimit int) string {
 	prefix := narrativeWithIntent(sctx, whatChanged)
-	tail := minimalTail(riskLine, pipelineMD)
+	tail := compactTail(mode, riskLine, pipelineMD)
 	full := joinBlocks(prefix, tail)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
@@ -150,9 +164,9 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 // buildPRBodyWithin is buildPRBody under a byte budget below the default,
 // which the Issues section uses to reserve its own room.
 func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int) string {
-	switch appendixMode(sctx) {
-	case config.PRAppendixMinimal:
-		return buildMinimalPRBody(body, riskLine, pipelineMD, sctx, maxBytes)
+	switch mode := appendixMode(sctx); mode {
+	case config.PRAppendixMinimal, config.PRAppendixNone:
+		return buildMinimalPRBody(mode, body, riskLine, pipelineMD, sctx, maxBytes)
 	case config.PRAppendixCollapsed:
 		if prBodyFlavorFor(provider) == prBodyHTML {
 			return buildCollapsedPRBody(body, riskLine, testingMD, pipelineMD, sctx, maxBytes)
@@ -161,9 +175,9 @@ func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipel
 	return buildPRBodyFull(body, riskLine, testingMD, pipelineMD, sctx, maxBytes)
 }
 
-func buildMinimalPRBody(body, riskLine, pipelineMD string, sctx *pipeline.StepContext, maxBytes int) string {
+func buildMinimalPRBody(mode, body, riskLine, pipelineMD string, sctx *pipeline.StepContext, maxBytes int) string {
 	prefix := narrativeWithIntent(sctx, body)
-	tail := minimalTail(riskLine, pipelineMD)
+	tail := compactTail(mode, riskLine, pipelineMD)
 	full := joinBlocks(prefix, tail)
 	if len(full) <= maxBytes {
 		return full

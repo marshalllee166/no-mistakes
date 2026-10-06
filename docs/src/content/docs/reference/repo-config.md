@@ -298,15 +298,17 @@ Choose how much of the generated Risk, Testing, and Pipeline tail is visible aft
 | | |
 | --- | --- |
 | Type | `string` |
-| Values | `full`, `collapsed`, `minimal` |
-| Default | `full` (missing or empty also preserves the default) |
-| Trust | Trusted default branch only, regardless of `allow_repo_commands` |
+| Values | `full`, `collapsed`, `minimal`, `none` |
+| Default | `full` (missing or empty also preserves the default), or the operator's global or machine-local [`pr.appendix`](/no-mistakes/reference/global-config/#pr) |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands`; when set it wins over the operator default |
 
 `full` is today's body: `## Risk Assessment`, `## Testing`, and `## Pipeline` follow the narrative, in that order.
 
 `collapsed` folds those three sections into one closed `Validation` details block. The narrative, and the Intent section when it is published, stay outside the block. Within the body limit, opening the block shows the same recorded evidence `full` would have published. If an ordinary body exceeds the limit, Testing is dropped before pipeline history is shortened; the attestation is retained. Bitbucket Cloud escapes raw HTML, so `collapsed` stays on the `full` appendix there instead of printing the details tags as text.
 
 `minimal` keeps a single risk line (the recorded level and rationale, on one line) and the pipeline attestation. Testing logs, pipeline round history, and the Risk and Pipeline headings are omitted. The attestation marker stays in its host-specific form: an HTML comment on GitHub, GitLab, Gitea, Forgejo, Azure, and provider plugins, and a visible text fence on an owned Bitbucket description. Ordinary unowned Bitbucket descriptions still omit the comment.
+
+`none` keeps only the pipeline attestation marker: no risk line, signature, Testing, or Pipeline prose. The marker is an HTML comment those hosts do not render; ordinary unowned Bitbucket descriptions carry none, so they get no appendix at all.
 
 An unrecognized value fails config parsing closed. Body size limits and truncation still apply in every mode. A templated body that cannot fit still fails instead of dropping author text. The marker remains the one `require-no-mistakes` binds to the PR head.
 

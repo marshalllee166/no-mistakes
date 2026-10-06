@@ -72,7 +72,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		sctx.Log("fix selection holds only the Test agent budget cut; re-running validation without a repair turn...")
 		fixSummary = NoChangesAppliedSummary
 	} else if sctx.Fixing {
-		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
+		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule + ciOnlyE2EPolicySection(sctx)
 		fixPrompt := fmt.Sprintf(
 			`Fix the failing tests in this repository. Reproduce the specific failure, identify the root cause, and fix either the tests or the code so that failure passes.
 
@@ -225,7 +225,7 @@ Previous test findings to address:
 	if declaration := commandOverrideDeclaration("test", sctx.Config.CommandOverrides["test"]); declaration != "" && len(baselineResults) > 0 {
 		configuredTestCommand += fmt.Sprintf("Baseline ran with %s. Declare these overrides in testing_summary.\n", declaration)
 	}
-	trustedRunbook := trustedTestInstructionsSection(sctx) + budgetCutGuidanceSection(sctx)
+	trustedRunbook := trustedTestInstructionsSection(sctx) + ciOnlyE2EPolicySection(sctx) + budgetCutGuidanceSection(sctx)
 	fallbackGuidance := `- Never treat "do not run everything" as permission to run nothing: if no existing check drives a scenario, write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
 - If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and why the user needs to decide what to do. When the blocker is a host capability or OS permission the agent's own process lacks (for example, the Screen Recording permission macOS requires to capture a native GUI application), name the specific capability or permission and how to grant it so the user can enable it and re-run, instead of retrying blindly or failing opaquely.`
 	if sctx.Run.VerificationPlan != nil {
@@ -320,7 +320,7 @@ Rules:
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
 	}
 
-	findings.Items = append(findings.Items, verdictFindings(findings)...)
+	findings.Items = append(findings.Items, verdictFindings(findings, testE2EInCI(sctx))...)
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	autoFixable := needsApproval
@@ -460,6 +460,25 @@ func trustedTestInstructionsSection(sctx *pipeline.StepContext) string {
 		sanitizePromptMultilineText(instructions) + "\n"
 }
 
+func testE2EInCI(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.Test.E2EInCI
+}
+
+// ciOnlyE2EPolicySection is the operator's global test.e2e: ci policy. It
+// follows the repository runbook so it overrides any local stand-up there.
+func ciOnlyE2EPolicySection(sctx *pipeline.StepContext) string {
+	if !testE2EInCI(sctx) {
+		return ""
+	}
+	return `
+Operator policy (this machine's global config, test.e2e: ci): end-to-end validation runs only in CI on the pull request. This overrides every instruction here, including the repository runbook, to stand the product up or drive it live:
+- Do NOT run Playwright, hermetic, or any other end-to-end suite locally.
+- Do NOT start dev servers, docker or compose stacks, emulators, or any other local instance of the product or its services.
+- Validate with targeted unit, integration, or story tests for the changed code only.
+- A scenario that needs the running product is "untested", live=false, with a reason saying end-to-end validation runs in CI under operator policy. Never mark a targeted test live.
+`
+}
+
 // verdictFindings turns the evidence turn's own verdict into findings, which
 // is what stops a verdict from being decoration on a green step.
 //
@@ -483,11 +502,16 @@ func trustedTestInstructionsSection(sctx *pipeline.StepContext) string {
 //     that masquerade).
 //   - "go" adds nothing.
 //
+// Under the operator's test.e2e: ci policy, "inconclusive" is an info no-op
+// finding instead: live driving is CI's job there, so the gap is expected
+// rather than a question. The completed step still reports the verdict as a
+// Test exception (db.StepResult.TestOverrideReason), never a clean pass.
+//
 // Untested scenarios never produce a finding at any verdict. They are listed
 // on the pull request (see the Testing section's scenario table) precisely so
 // that reporting one honestly costs a contributor nothing; making them park
 // would push the agent back towards guessing a pass.
-func verdictFindings(findings Findings) []Finding {
+func verdictFindings(findings Findings, e2eInCI bool) []Finding {
 	live, total := types.LiveScenarioCounts(findings.Scenarios)
 	coverage := fmt.Sprintf("%d of %d scenarios were driven live against the product", live, total)
 	switch findings.Verdict {
@@ -498,6 +522,13 @@ func verdictFindings(findings Findings) []Finding {
 			Description: fmt.Sprintf("live validation verdict: no-go (%s)%s", coverage, failedScenarioSuffix(findings.Scenarios)),
 		}}
 	case types.TestVerdictInconclusive:
+		if e2eInCI {
+			return []Finding{{
+				Severity:    types.FindingSeverityInfo,
+				Action:      types.ActionNoOp,
+				Description: fmt.Sprintf("live validation verdict: inconclusive (%s)%s; end-to-end validation deferred to CI by operator policy test.e2e: ci", coverage, untestedScenarioSuffix(findings.Scenarios)),
+			}}
+		}
 		return []Finding{{
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,

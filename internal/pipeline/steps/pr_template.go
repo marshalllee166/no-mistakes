@@ -43,6 +43,11 @@ func supportsPRTemplates(provider scm.Provider) bool {
 	}
 }
 
+// preservesPRBody reports the operator's pr.preserve_body owned-body mode.
+func preservesPRBody(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.PR.PreserveBody
+}
+
 func configuredPRTemplate(sctx *pipeline.StepContext) string {
 	if sctx.Config == nil {
 		return ""
